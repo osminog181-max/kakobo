@@ -1,12 +1,12 @@
 import sqlite3
 from pathlib import Path
-from constants import DB_PATH, CATEGORIES
+from constants import DB_PATH
 
 
 class Database:
     def __init__(self, path: Path = DB_PATH):
         self.path = path
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
 
@@ -115,7 +115,7 @@ class Database:
     # ---------- Расходы ----------
     def get_expenses_for_week(self, week_id: int):
         return self.conn.execute(
-            "SELECT * FROM expenses WHERE week_id = ? ORDER BY date, id",
+            "SELECT * FROM expenses WHERE week_id = ? ORDER BY date DESC, id DESC",
             (week_id,)
         ).fetchall()
 

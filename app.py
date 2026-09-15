@@ -1,479 +1,224 @@
-import customtkinter as ctk
-from tkinter import ttk, messagebox
-from datetime import datetime, date
-
+import streamlit as st
+from datetime import date, datetime
 from database import Database
 from constants import CATEGORIES, FOOD_CATEGORIES
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+st.set_page_config(
+    page_title="Кекобо",
+    page_icon="📒",
+    layout="wide"
+)
+
+# ---------- Инициализация ----------
+@st.cache_resource
+def get_db():
+    return Database()
+
+db = get_db()
+
+# ---------- Хелперы ----------
+def format_money(value: float) -> str:
+    return f"{value:,.2f} €".replace(",", " ")
 
 
-class KekoboApp(ctk.CTk):
-    def __init__(self):
-        super().__init__()
+def get_month_label(m):
+    label = m["start_date"]
+    if m["note"]:
+        label += f" — {m['note']}"
+    return label
 
-        self.title("Кекобо — учёт расходов")
-        self.geometry("1100x780")
-        self.minsize(900, 650)
 
-        self.db = Database()
-        self.current_month_id = None
-        self.current_week_id = None
-        self.tree_item_to_id = {}
+# ---------- Боковая панель ----------
+st.sidebar.title("Кекобо 📒")
 
-        self._build_ui()
-        self._load_months_into_combobox()
+months = db.get_all_months()
+month_options = {get_month_label(m): m["id"] for m in months}
 
-    def _build_ui(self):
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=10, pady=10)
+if not month_options:
+    st.sidebar.info("Пока нет ни одного месяца")
+    selected_month_id = None
+else:
+    selected_label = st.sidebar.selectbox(
+        "Месяц (дата начала)",
+        options=list(month_options.keys()),
+        index=0
+    )
+    selected_month_id = month_options[selected_label]
 
-        self.tab_main = self.tabview.add("Кекобо")
-        self.tab_charts = self.tabview.add("Графики")
+# Недели
+selected_week_id = None
+if selected_month_id:
+    weeks = db.get_weeks_for_month(selected_month_id)
+    week_options = {
+        f"Неделя {w['week_num']} ({w['start_date']})": w["id"]
+        for w in weeks
+    }
 
-        self._build_main_tab()
-        self._build_charts_tab()
-
-    def _build_main_tab(self):
-        # Выбор месяца / недели
-        top_frame = ctk.CTkFrame(self.tab_main)
-        top_frame.pack(fill="x", padx=5, pady=(5, 10))
-
-        ctk.CTkLabel(top_frame, text="Месяц (дата начала):").pack(side="left", padx=(10, 5))
-        self.month_combo = ctk.CTkComboBox(
-            top_frame, values=["— нет месяцев —"], width=220, command=self._on_month_selected
+    if week_options:
+        selected_week_label = st.sidebar.selectbox(
+            "Неделя",
+            options=list(week_options.keys()),
+            index=len(week_options) - 1  # последняя неделя по умолчанию
         )
-        self.month_combo.pack(side="left", padx=5)
+        selected_week_id = week_options[selected_week_label]
+    else:
+        st.sidebar.warning("В этом месяце ещё нет недель")
 
-        ctk.CTkLabel(top_frame, text="Неделя:").pack(side="left", padx=(20, 5))
-        self.week_combo = ctk.CTkComboBox(
-            top_frame, values=["— выберите месяц —"], width=180, command=self._on_week_selected
-        )
-        self.week_combo.pack(side="left", padx=5)
+st.sidebar.divider()
 
-        # --- Итоги: Всего потрачено + 3 остатка ---
-        total_frame = ctk.CTkFrame(self.tab_main)
-        total_frame.pack(fill="x", padx=5, pady=(0, 8))
+# Кнопки создания
+with st.sidebar.expander("➕ Создать новый месяц", expanded=False):
+    with st.form("new_month_form"):
+        new_date = st.date_input("Дата начала месяца", value=date.today())
+        new_salary = st.number_input("Зарплата (€)", min_value=0.0, step=10.0, value=0.0)
+        new_food_home = st.number_input("Еда домашняя (€) — откладывается", min_value=0.0, step=5.0, value=0.0)
+        new_food_work = st.number_input("Еда работа (€) — откладывается", min_value=0.0, step=5.0, value=0.0)
+        new_note = st.text_input("Заметка (необязательно)")
 
-        # Первая строка
-        row1 = ctk.CTkFrame(total_frame, fg_color="transparent")
-        row1.pack(pady=(10, 4))
-
-        ctk.CTkLabel(row1, text="Всего потрачено:", font=ctk.CTkFont(size=15)).pack(side="left", padx=(15, 5))
-        self.total_spent_label = ctk.CTkLabel(row1, text="0.00 €", font=ctk.CTkFont(size=16, weight="bold"))
-        self.total_spent_label.pack(side="left", padx=(0, 30))
-
-        ctk.CTkLabel(row1, text="Общий остаток:", font=ctk.CTkFont(size=15)).pack(side="left", padx=(10, 5))
-        self.total_remain_label = ctk.CTkLabel(row1, text="0.00 €", font=ctk.CTkFont(size=16, weight="bold"))
-        self.total_remain_label.pack(side="left")
-
-        # Вторая строка — остатки по еде
-        row2 = ctk.CTkFrame(total_frame, fg_color="transparent")
-        row2.pack(pady=(4, 10))
-
-        ctk.CTkLabel(row2, text="Еда домашняя:", font=ctk.CTkFont(size=14)).pack(side="left", padx=(15, 5))
-        self.food_home_remain_label = ctk.CTkLabel(row2, text="0.00 €", font=ctk.CTkFont(size=14, weight="bold"))
-        self.food_home_remain_label.pack(side="left", padx=(0, 30))
-
-        ctk.CTkLabel(row2, text="Еда работа:", font=ctk.CTkFont(size=14)).pack(side="left", padx=(10, 5))
-        self.food_work_remain_label = ctk.CTkLabel(row2, text="0.00 €", font=ctk.CTkFont(size=14, weight="bold"))
-        self.food_work_remain_label.pack(side="left")
-
-        # По категориям
-        summary_frame = ctk.CTkFrame(self.tab_main)
-        summary_frame.pack(fill="x", padx=5, pady=5)
-
-        ctk.CTkLabel(summary_frame, text="По категориям", font=ctk.CTkFont(size=14, weight="bold")).pack(
-            anchor="w", padx=10, pady=(8, 5)
-        )
-
-        cols_frame = ctk.CTkFrame(summary_frame, fg_color="transparent")
-        cols_frame.pack(fill="x", padx=10, pady=5)
-
-        # Потрачено
-        left = ctk.CTkFrame(cols_frame)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        ctk.CTkLabel(left, text="Потрачено", font=ctk.CTkFont(weight="bold")).pack(pady=5)
-
-        self.spent_labels = {}
-        for cat in CATEGORIES:
-            row = ctk.CTkFrame(left, fg_color="transparent")
-            row.pack(fill="x", padx=8, pady=2)
-            ctk.CTkLabel(row, text=cat, width=140, anchor="w").pack(side="left")
-            lbl = ctk.CTkLabel(row, text="0.00 €", width=100, anchor="e")
-            lbl.pack(side="right")
-            self.spent_labels[cat] = lbl
-
-        # Осталось
-        right = ctk.CTkFrame(cols_frame)
-        right.pack(side="left", fill="both", expand=True, padx=(5, 0))
-        ctk.CTkLabel(right, text="Осталось", font=ctk.CTkFont(weight="bold")).pack(pady=5)
-
-        self.remain_labels = {}
-        for cat in CATEGORIES:
-            row = ctk.CTkFrame(right, fg_color="transparent")
-            row.pack(fill="x", padx=8, pady=2)
-            ctk.CTkLabel(row, text=cat, width=140, anchor="w").pack(side="left")
-            lbl = ctk.CTkLabel(row, text="— €", width=100, anchor="e")
-            lbl.pack(side="right")
-            self.remain_labels[cat] = lbl
-
-        # Кнопка добавить
-        btn_frame = ctk.CTkFrame(self.tab_main, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=5, pady=8)
-
-        ctk.CTkButton(
-            btn_frame, text="➕ Добавить запись",
-            command=self._open_add_expense_dialog, width=180
-        ).pack(side="left", padx=5)
-
-        # Таблица
-        table_frame = ctk.CTkFrame(self.tab_main)
-        table_frame.pack(fill="both", expand=True, padx=5, pady=5)
-
-        ctk.CTkLabel(table_frame, text="Записи", font=ctk.CTkFont(size=14, weight="bold")).pack(
-            anchor="w", padx=10, pady=(8, 4)
-        )
-
-        columns = ("date", "amount", "category", "notes")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=11, selectmode="browse")
-
-        self.tree.heading("date", text="Дата")
-        self.tree.heading("amount", text="Сумма")
-        self.tree.heading("category", text="Категория")
-        self.tree.heading("notes", text="Примечания")
-
-        self.tree.column("date", width=110, anchor="center")
-        self.tree.column("amount", width=100, anchor="e")
-        self.tree.column("category", width=150)
-        self.tree.column("notes", width=350)
-
-        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-        self.tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=5)
-        scrollbar.pack(side="right", fill="y", padx=(0, 10), pady=5)
-
-        # Нижние кнопки
-        bottom_frame = ctk.CTkFrame(self.tab_main, fg_color="transparent")
-        bottom_frame.pack(fill="x", padx=5, pady=10)
-
-        ctk.CTkButton(
-            bottom_frame, text="📅 Начать новую неделю",
-            command=self._start_new_week, width=180
-        ).pack(side="left", padx=5)
-
-        ctk.CTkButton(
-            bottom_frame, text="💰 Начать новый месяц",
-            command=self._start_new_month, width=180,
-            fg_color="#2d6a4f", hover_color="#1b4332"
-        ).pack(side="left", padx=5)
-
-        ctk.CTkButton(
-            bottom_frame, text="🗑 Удалить выбранную запись",
-            command=self._delete_selected_expense, width=200,
-            fg_color="#9b2226", hover_color="#660708"
-        ).pack(side="right", padx=5)
-
-    def _build_charts_tab(self):
-        ctk.CTkLabel(
-            self.tab_charts,
-            text="Здесь будут графики\n(пока заглушка)",
-            font=ctk.CTkFont(size=18)
-        ).pack(expand=True)
-
-    # ==================== ЛОГИКА ====================
-    def _load_months_into_combobox(self):
-        months = self.db.get_all_months()
-        if not months:
-            self.month_combo.configure(values=["— нет месяцев —"])
-            self.month_combo.set("— нет месяцев —")
-            return
-
-        values = []
-        self.month_id_map = {}
-        for m in months:
-            label = f"{m['start_date']}"
-            if m["note"]:
-                label += f" — {m['note']}"
-            values.append(label)
-            self.month_id_map[label] = m["id"]
-
-        self.month_combo.configure(values=values)
-        self.month_combo.set(values[0])
-        self._on_month_selected(values[0])
-
-    def _on_month_selected(self, choice: str):
-        if choice not in getattr(self, "month_id_map", {}):
-            self.current_month_id = None
-            self.week_combo.configure(values=["— выберите месяц —"])
-            self.week_combo.set("— выберите месяц —")
-            return
-
-        self.current_month_id = self.month_id_map[choice]
-        self._load_weeks_into_combobox()
-
-    def _load_weeks_into_combobox(self):
-        if not self.current_month_id:
-            return
-
-        weeks = self.db.get_weeks_for_month(self.current_month_id)
-        if not weeks:
-            self.week_combo.configure(values=["— нет недель —"])
-            self.week_combo.set("— нет недель —")
-            self.current_week_id = None
-            self._clear_table()
-            self._update_summary()
-            return
-
-        values = []
-        self.week_id_map = {}
-        for w in weeks:
-            label = f"Неделя {w['week_num']} ({w['start_date']})"
-            values.append(label)
-            self.week_id_map[label] = w["id"]
-
-        self.week_combo.configure(values=values)
-        self.week_combo.set(values[-1])
-        self._on_week_selected(values[-1])
-
-    def _on_week_selected(self, choice: str):
-        if choice not in getattr(self, "week_id_map", {}):
-            self.current_week_id = None
-            self._clear_table()
-            self._update_summary()
-            return
-
-        self.current_week_id = self.week_id_map[choice]
-        self._load_expenses_table()
-        self._update_summary()
-
-    def _clear_table(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self.tree_item_to_id.clear()
-
-    def _load_expenses_table(self):
-        self._clear_table()
-        if not self.current_week_id:
-            return
-
-        for e in self.db.get_expenses_for_week(self.current_week_id):
-            item = self.tree.insert("", "end", values=(
-                e["date"],
-                f"{e['amount']:.2f} €",
-                e["category"],
-                e["notes"] or ""
-            ))
-            self.tree_item_to_id[item] = e["id"]
-
-    def _update_summary(self):
-        if not self.current_month_id:
-            self.total_spent_label.configure(text="0.00 €")
-            self.total_remain_label.configure(text="0.00 €")
-            self.food_home_remain_label.configure(text="0.00 €")
-            self.food_work_remain_label.configure(text="0.00 €")
-            for cat in CATEGORIES:
-                self.spent_labels[cat].configure(text="0.00 €")
-                self.remain_labels[cat].configure(text="— €")
-            return
-
-        month = self.db.get_month(self.current_month_id)
-        salary = month["salary"] if month else 0.0
-        budgets = self.db.get_category_budgets(self.current_month_id)
-        spent = self.db.get_spent_by_category(self.current_month_id)
-
-        # Бюджеты еды (отложенные кошельки)
-        food_home_budget = budgets.get("Еда домашняя", 0.0)
-        food_work_budget = budgets.get("Еда работа", 0.0)
-
-        # Фактические траты
-        spent_food_home = spent.get("Еда домашняя", 0.0)
-        spent_food_work = spent.get("Еда работа", 0.0)
-        total_spent = sum(spent.values())
-        spent_other = total_spent - spent_food_home - spent_food_work
-
-        # === Остатки ===
-        # 1. Общий остаток = (зарплата - еда) - траты по остальным категориям
-        main_available = salary - food_home_budget - food_work_budget
-        total_remain = main_available - spent_other
-
-        # 2 и 3. Остатки по еде
-        remain_food_home = food_home_budget - spent_food_home
-        remain_food_work = food_work_budget - spent_food_work
-
-        # Обновляем верхние цифры
-        self.total_spent_label.configure(text=f"{total_spent:.2f} €")
-        self.total_remain_label.configure(text=f"{total_remain:.2f} €")
-        self.food_home_remain_label.configure(text=f"{remain_food_home:.2f} €")
-        self.food_work_remain_label.configure(text=f"{remain_food_work:.2f} €")
-
-        # По категориям
-        for cat in CATEGORIES:
-            amount = spent.get(cat, 0.0)
-            self.spent_labels[cat].configure(text=f"{amount:.2f} €")
-
-            if cat == "Еда домашняя":
-                self.remain_labels[cat].configure(text=f"{remain_food_home:.2f} €")
-            elif cat == "Еда работа":
-                self.remain_labels[cat].configure(text=f"{remain_food_work:.2f} €")
-            else:
-                self.remain_labels[cat].configure(text="— €")
-
-    def _open_add_expense_dialog(self):
-        if not self.current_week_id:
-            messagebox.showwarning("Нет недели", "Сначала выберите или создайте неделю.")
-            return
-
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Добавить запись")
-        dialog.geometry("420x380")
-        dialog.transient(self)
-        dialog.grab_set()
-
-        ctk.CTkLabel(dialog, text="Дата (ГГГГ-ММ-ДД):").pack(pady=(15, 0))
-        date_entry = ctk.CTkEntry(dialog, width=200)
-        date_entry.insert(0, date.today().isoformat())
-        date_entry.pack(pady=5)
-
-        ctk.CTkLabel(dialog, text="Сумма (€):").pack(pady=(10, 0))
-        amount_entry = ctk.CTkEntry(dialog, width=200)
-        amount_entry.pack(pady=5)
-
-        ctk.CTkLabel(dialog, text="Категория:").pack(pady=(10, 0))
-        cat_combo = ctk.CTkComboBox(dialog, values=CATEGORIES, width=200)
-        cat_combo.set(CATEGORIES[0])
-        cat_combo.pack(pady=5)
-
-        ctk.CTkLabel(dialog, text="Примечания:").pack(pady=(10, 0))
-        notes_entry = ctk.CTkEntry(dialog, width=300)
-        notes_entry.pack(pady=5)
-
-        def save():
-            try:
-                amount = float(amount_entry.get().replace(",", "."))
-                if amount <= 0:
-                    raise ValueError
-            except ValueError:
-                messagebox.showerror("Ошибка", "Введите корректную сумму.")
-                return
-
-            d = date_entry.get().strip()
-            try:
-                datetime.strptime(d, "%Y-%m-%d")
-            except ValueError:
-                messagebox.showerror("Ошибка", "Дата должна быть в формате ГГГГ-ММ-ДД.")
-                return
-
-            self.db.add_expense(
-                week_id=self.current_week_id,
-                date=d,
-                amount=amount,
-                category=cat_combo.get(),
-                notes=notes_entry.get().strip()
+        submitted = st.form_submit_button("Создать месяц")
+        if submitted:
+            month_id = db.add_month(
+                start_date=new_date.isoformat(),
+                salary=new_salary,
+                note=new_note.strip()
             )
-            dialog.destroy()
-            self._load_expenses_table()
-            self._update_summary()
+            db.set_category_budget(month_id, "Еда домашняя", new_food_home)
+            db.set_category_budget(month_id, "Еда работа", new_food_work)
+            db.add_week(month_id=month_id, week_num=1, start_date=new_date.isoformat())
+            st.success("Месяц создан!")
+            st.rerun()
 
-        ctk.CTkButton(dialog, text="Сохранить", command=save, width=150).pack(pady=20)
-
-    def _delete_selected_expense(self):
-        selected = self.tree.selection()
-        if not selected:
-            messagebox.showinfo("Нет выбора", "Выберите запись в таблице.")
-            return
-
-        item = selected[0]
-        expense_id = self.tree_item_to_id.get(item)
-        if not expense_id:
-            return
-
-        if messagebox.askyesno("Подтверждение", "Удалить выбранную запись?"):
-            self.db.delete_expense(expense_id)
-            self._load_expenses_table()
-            self._update_summary()
-
-    def _start_new_week(self):
-        if not self.current_month_id:
-            messagebox.showwarning("Нет месяца", "Сначала создайте месяц.")
-            return
-
-        weeks = self.db.get_weeks_for_month(self.current_month_id)
+if selected_month_id:
+    if st.sidebar.button("📅 Начать новую неделю"):
+        weeks = db.get_weeks_for_month(selected_month_id)
         next_num = len(weeks) + 1
         today = date.today().isoformat()
+        db.add_week(month_id=selected_month_id, week_num=next_num, start_date=today)
+        st.success(f"Создана Неделя {next_num}")
+        st.rerun()
 
-        self.db.add_week(month_id=self.current_month_id, week_num=next_num, start_date=today)
-        self._load_weeks_into_combobox()
-        messagebox.showinfo("Готово", f"Создана Неделя {next_num} (начало {today})")
+# ---------- Основная часть ----------
+st.title("Кекобо")
 
-    def _start_new_month(self):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Новый месяц")
-        dialog.geometry("420x420")
-        dialog.transient(self)
-        dialog.grab_set()
+if not selected_month_id:
+    st.info("Создай первый месяц в боковой панели →")
+    st.stop()
 
-        ctk.CTkLabel(dialog, text="Дата начала месяца:").pack(pady=(20, 0))
-        date_entry = ctk.CTkEntry(dialog, width=200)
-        date_entry.insert(0, date.today().isoformat())
-        date_entry.pack(pady=5)
+# ===== Расчёт итогов =====
+month = db.get_month(selected_month_id)
+salary = month["salary"] or 0.0
+budgets = db.get_category_budgets(selected_month_id)
+spent = db.get_spent_by_category(selected_month_id)
 
-        ctk.CTkLabel(dialog, text="Зарплата (€):").pack(pady=(12, 0))
-        salary_entry = ctk.CTkEntry(dialog, width=200)
-        salary_entry.insert(0, "0")
-        salary_entry.pack(pady=5)
+food_home_budget = budgets.get("Еда домашняя", 0.0)
+food_work_budget = budgets.get("Еда работа", 0.0)
 
-        ctk.CTkLabel(dialog, text="Еда работа (€) — откладывается:").pack(pady=(12, 0))
-        food_work_entry = ctk.CTkEntry(dialog, width=200)
-        food_work_entry.insert(0, "0")
-        food_work_entry.pack(pady=5)
+spent_food_home = spent.get("Еда домашняя", 0.0)
+spent_food_work = spent.get("Еда работа", 0.0)
+total_spent = sum(spent.values())
+spent_other = total_spent - spent_food_home - spent_food_work
 
-        ctk.CTkLabel(dialog, text="Еда домашняя (€) — откладывается:").pack(pady=(12, 0))
-        food_home_entry = ctk.CTkEntry(dialog, width=200)
-        food_home_entry.insert(0, "0")
-        food_home_entry.pack(pady=5)
+main_available = salary - food_home_budget - food_work_budget
+total_remain = main_available - spent_other
+remain_food_home = food_home_budget - spent_food_home
+remain_food_work = food_work_budget - spent_food_work
 
-        ctk.CTkLabel(dialog, text="Заметка (необязательно):").pack(pady=(12, 0))
-        note_entry = ctk.CTkEntry(dialog, width=250)
-        note_entry.pack(pady=5)
+# ===== Метрики =====
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Всего потрачено", format_money(total_spent))
+col2.metric("Общий остаток", format_money(total_remain))
+col3.metric("Еда домашняя", format_money(remain_food_home))
+col4.metric("Еда работа", format_money(remain_food_work))
 
-        def create():
-            d = date_entry.get().strip()
-            try:
-                datetime.strptime(d, "%Y-%m-%d")
-            except ValueError:
-                messagebox.showerror("Ошибка", "Неверный формат даты.")
-                return
+st.divider()
 
-            try:
-                salary = float(salary_entry.get().replace(",", ".") or 0)
-                food_work = float(food_work_entry.get().replace(",", ".") or 0)
-                food_home = float(food_home_entry.get().replace(",", ".") or 0)
-            except ValueError:
-                messagebox.showerror("Ошибка", "Неверные суммы.")
-                return
+# ===== По категориям =====
+st.subheader("По категориям")
 
-            month_id = self.db.add_month(
-                start_date=d,
-                salary=salary,
-                note=note_entry.get().strip()
+left, right = st.columns(2)
+
+with left:
+    st.markdown("**Потрачено**")
+    for cat in CATEGORIES:
+        amount = spent.get(cat, 0.0)
+        st.write(f"{cat}: **{format_money(amount)}**")
+
+with right:
+    st.markdown("**Осталось**")
+    for cat in CATEGORIES:
+        if cat == "Еда домашняя":
+            st.write(f"{cat}: **{format_money(remain_food_home)}**")
+        elif cat == "Еда работа":
+            st.write(f"{cat}: **{format_money(remain_food_work)}**")
+        else:
+            st.write(f"{cat}: —")
+
+st.divider()
+
+# ===== Добавление записи =====
+st.subheader("Добавить запись")
+
+if not selected_week_id:
+    st.warning("Сначала выбери или создай неделю")
+else:
+    with st.form("add_expense_form", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            exp_date = st.date_input("Дата", value=date.today())
+        with c2:
+            exp_amount = st.number_input("Сумма (€)", min_value=0.01, step=1.0, format="%.2f")
+        with c3:
+            exp_category = st.selectbox("Категория", CATEGORIES)
+
+        exp_notes = st.text_input("Примечания")
+
+        if st.form_submit_button("💾 Сохранить"):
+            db.add_expense(
+                week_id=selected_week_id,
+                date=exp_date.isoformat(),
+                amount=exp_amount,
+                category=exp_category,
+                notes=exp_notes.strip()
             )
+            st.success("Запись добавлена")
+            st.rerun()
 
-            # Откладываем еду в отдельные кошельки
-            self.db.set_category_budget(month_id, "Еда работа", food_work)
-            self.db.set_category_budget(month_id, "Еда домашняя", food_home)
+# ===== Таблица записей =====
+st.subheader("Записи текущей недели")
 
-            # Первая неделя
-            self.db.add_week(month_id=month_id, week_num=1, start_date=d)
+if selected_week_id:
+    expenses = db.get_expenses_for_week(selected_week_id)
 
-            dialog.destroy()
-            self._load_months_into_combobox()
-            messagebox.showinfo("Готово", f"Новый месяц создан с {d}")
+    if expenses:
+        import pandas as pd
 
-        ctk.CTkButton(dialog, text="Создать месяц", command=create, width=160).pack(pady=25)
+        df = pd.DataFrame([
+            {
+                "Дата": e["date"],
+                "Сумма": f"{e['amount']:.2f} €",
+                "Категория": e["category"],
+                "Примечания": e["notes"] or "",
+                "id": e["id"]
+            }
+            for e in expenses
+        ])
 
-    def on_closing(self):
-        self.db.close()
-        self.destroy()
+        # Показываем без id
+        st.dataframe(
+            df.drop(columns=["id"]),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # Удаление
+        with st.expander("🗑 Удалить запись"):
+            ids = {f"{row['Дата']} | {row['Сумма']} | {row['Категория']}": row["id"] for _, row in df.iterrows()}
+            to_delete = st.selectbox("Выбери запись для удаления", options=list(ids.keys()))
+            if st.button("Удалить", type="primary"):
+                db.delete_expense(ids[to_delete])
+                st.success("Удалено")
+                st.rerun()
+    else:
+        st.info("В этой неделе пока нет записей")
+else:
+    st.info("Выбери неделю")
