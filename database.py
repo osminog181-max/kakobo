@@ -14,6 +14,17 @@ class Database:
         cur = self.conn.cursor()
 
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS incomes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                month_id    INTEGER NOT NULL,
+                date        TEXT NOT NULL,
+                amount      REAL NOT NULL,
+                notes       TEXT DEFAULT '',
+                FOREIGN KEY (month_id) REFERENCES months(id) ON DELETE CASCADE
+            )
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS months (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 start_date  TEXT NOT NULL,
@@ -140,3 +151,28 @@ class Database:
             GROUP BY e.category
         """, (month_id,))
         return {row["category"]: row["total"] for row in cur.fetchall()}
+
+    def add_income(self, month_id: int, date: str, amount: float, notes: str = ""):
+        cur = self.conn.execute(
+            "INSERT INTO incomes (month_id, date, amount, notes) VALUES (?, ?, ?, ?)",
+            (month_id, date, amount, notes)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_incomes_for_month(self, month_id: int):
+        return self.conn.execute(
+            "SELECT * FROM incomes WHERE month_id = ? ORDER BY date DESC, id DESC",
+            (month_id,)
+        ).fetchall()
+
+    def delete_income(self, income_id: int):
+        self.conn.execute("DELETE FROM incomes WHERE id = ?", (income_id,))
+        self.conn.commit()
+
+    def get_total_incomes(self, month_id: int) -> float:
+        cur = self.conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) as total FROM incomes WHERE month_id = ?",
+            (month_id,)
+        )
+        return cur.fetchone()["total"]

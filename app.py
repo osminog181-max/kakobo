@@ -109,6 +109,7 @@ month = db.get_month(selected_month_id)
 salary = month["salary"] or 0.0
 budgets = db.get_category_budgets(selected_month_id)
 spent = db.get_spent_by_category(selected_month_id)
+additional_incomes = db.get_total_incomes(selected_month_id)
 
 food_home_budget = budgets.get("Еда домашняя", 0.0)
 food_work_budget = budgets.get("Еда работа", 0.0)
@@ -118,17 +119,19 @@ spent_food_work = spent.get("Еда работа", 0.0)
 total_spent = sum(spent.values())
 spent_other = total_spent - spent_food_home - spent_food_work
 
-main_available = salary - food_home_budget - food_work_budget
+# Теперь учитываем дополнительные доходы
+main_available = salary + additional_incomes - food_home_budget - food_work_budget
 total_remain = main_available - spent_other
 remain_food_home = food_home_budget - spent_food_home
 remain_food_work = food_work_budget - spent_food_work
 
 # ===== Метрики =====
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Всего потрачено", format_money(total_spent))
-col2.metric("Общий остаток", format_money(total_remain))
-col3.metric("Еда домашняя", format_money(remain_food_home))
-col4.metric("Еда работа", format_money(remain_food_work))
+col2.metric("Доп. доходы", format_money(additional_incomes))
+col3.metric("Общий остаток", format_money(total_remain))
+col4.metric("Еда домашняя", format_money(remain_food_home))
+col5.metric("Еда работа", format_money(remain_food_work))
 
 st.divider()
 
@@ -158,30 +161,56 @@ st.divider()
 # ===== Добавление записи =====
 st.subheader("Добавить запись")
 
-if not selected_week_id:
-    st.warning("Сначала выбери или создай неделю")
+if not selected_month_id:
+    st.warning("Сначала выбери месяц")
 else:
-    with st.form("add_expense_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            exp_date = st.date_input("Дата", value=date.today())
-        with c2:
-            exp_amount = st.number_input("Сумма (€)", min_value=0.01, step=1.0, format="%.2f")
-        with c3:
-            exp_category = st.selectbox("Категория", CATEGORIES)
+    record_type = st.radio("Тип записи", ["Расход", "Доход"], horizontal=True)
 
-        exp_notes = st.text_input("Примечания")
+    if record_type == "Расход":
+        if not selected_week_id:
+            st.warning("Для расхода сначала выбери или создай неделю")
+        else:
+            with st.form("add_expense_form", clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    exp_date = st.date_input("Дата", value=date.today())
+                with c2:
+                    exp_amount = st.number_input("Сумма (€)", min_value=0.01, step=1.0, format="%.2f")
+                with c3:
+                    exp_category = st.selectbox("Категория", CATEGORIES)
 
-        if st.form_submit_button("💾 Сохранить"):
-            db.add_expense(
-                week_id=selected_week_id,
-                date=exp_date.isoformat(),
-                amount=exp_amount,
-                category=exp_category,
-                notes=exp_notes.strip()
-            )
-            st.success("Запись добавлена")
-            st.rerun()
+                exp_notes = st.text_input("Примечания")
+
+                if st.form_submit_button("💾 Сохранить расход"):
+                    db.add_expense(
+                        week_id=selected_week_id,
+                        date=exp_date.isoformat(),
+                        amount=exp_amount,
+                        category=exp_category,
+                        notes=exp_notes.strip()
+                    )
+                    st.success("Расход добавлен")
+                    st.rerun()
+
+    else:  # Доход
+        with st.form("add_income_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                inc_date = st.date_input("Дата", value=date.today())
+            with c2:
+                inc_amount = st.number_input("Сумма (€)", min_value=0.01, step=1.0, format="%.2f")
+
+            inc_notes = st.text_input("Примечания (откуда доход)")
+
+            if st.form_submit_button("💰 Сохранить доход"):
+                db.add_income(
+                    month_id=selected_month_id,
+                    date=inc_date.isoformat(),
+                    amount=inc_amount,
+                    notes=inc_notes.strip()
+                )
+                st.success("Доход добавлен")
+                st.rerun()
 
 # ===== Таблица записей =====
 st.subheader("Записи текущей недели")
@@ -222,3 +251,31 @@ if selected_week_id:
         st.info("В этой неделе пока нет записей")
 else:
     st.info("Выбери неделю")
+
+st.subheader("Доходы за месяц")
+
+incomes = db.get_incomes_for_month(selected_month_id)
+
+if incomes:
+    import pandas as pd
+    df_inc = pd.DataFrame([
+        {
+            "Дата": i["date"],
+            "Сумма": f"{i['amount']:.2f} €",
+            "Примечания": i["notes"] or "",
+            "id": i["id"]
+        }
+        for i in incomes
+    ])
+
+    st.dataframe(df_inc.drop(columns=["id"]), use_container_width=True, hide_index=True)
+
+    with st.expander("🗑 Удалить доход"):
+        ids = {f"{row['Дата']} | {row['Сумма']} | {row['Примечания']}": row["id"] for _, row in df_inc.iterrows()}
+        to_delete = st.selectbox("Выбери доход", options=list(ids.keys()))
+        if st.button("Удалить доход", type="primary"):
+            db.delete_income(ids[to_delete])
+            st.success("Доход удалён")
+            st.rerun()
+else:
+    st.info("Дополнительных доходов пока нет")
